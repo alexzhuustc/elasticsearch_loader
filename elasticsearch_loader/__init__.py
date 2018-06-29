@@ -8,14 +8,56 @@ from click_stream import Stream
 from click_conf import conf
 from itertools import chain
 from datetime import datetime
+import os
 import csv
 import click
 import time
+import codecs
 
 from .parsers import json, parquet
 from .iter import grouper, bulk_builder, json_lines_iter
 
 
+GLOABL_OPTIONS = {}
+
+
+class FileWithLineRange:
+    def __init__(self, filepath, encoding='utf-8', line_start = 0, line_count = -1):
+        self.fileobject = codecs.open(filepath, "r", encoding)
+        self.current_no = 0
+        self.line_start = line_start
+        self.line_end = -1
+        if line_count >= 0:
+            self.line_end = line_start + line_count
+        
+    def __iter__(self):
+        return self
+    
+    def __next__(self):
+        while True:
+            ret = next(self.fileobject)
+            lineno = self.current_no
+            self.current_no += 1
+            
+            if lineno >= self.line_start and (self.line_end < 0 or lineno < self.line_end):
+                return ret
+                
+            if self.line_end >= 0 and lineno >= self.line_end:
+                raise StopIteration
+                
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.fileobject.close()
+        
+def csv_get_fieldnames(filepath, encoding):
+    if filepath == None or os.path.exists(filepath) == False:
+        return None
+    
+    with codecs.open(filepath, "r", encoding) as f:
+        return [field.strip(" \t\r\n\"") for field in f.readline().split(',') ]
+        
 def single_bulk_to_es(bulk, config, attempt_retry):
     bulk = bulk_builder(bulk, config)
 
@@ -82,8 +124,15 @@ def log(sevirity, msg):
 @click.option('--as-child', default=False, is_flag=True, help='Insert _parent, _routing field, the value is same as _id')
 @click.option('--with-retry', default=False, is_flag=True, help='Retry if ES bulk insertion failed')
 @click.option('--index-settings-file', type=click.File('rb'), help='Specify path to json file containing index mapping and settings, creates index if missing')
+@click.option('--delimiter', default=',', type=str, help='[CSV] Default ,')
+@click.option('--encoding', default='utf-8', type=str, help='[CSV] Default utf-8')
+@click.option('--header-file', default=None, type=str, help='[CSV] File path that contains one-line header')
+@click.option('--line-start', default=0, help='[CSV] The line number where import starts, first line is 0. Default 0')
+@click.option('--line-count', default=-1, help='[CSV] How many lines to import. Default -1 means unlimit')
+@click.option('--json-lines', default=False, is_flag=True, help='[JSON] Files formated as json lines')
 @click.pass_context
 def cli(ctx, **opts):
+    GLOABL_OPTIONS.update(opts)
     ctx.obj = opts
     es_opts = {x: y for x, y in opts.items() if x in ('use_ssl', 'ca_certs', 'verify_certs', 'http_auth')}
     ctx.obj['es_conn'] = Elasticsearch(opts['es_host'], **es_opts)
@@ -116,21 +165,24 @@ def cli(ctx, **opts):
 
 
 @cli.command(name='csv')
-@click.argument('files', type=Stream(file_mode='r'), nargs=-1, required=True)
-@click.option('--delimiter', default=',', type=str, help='Default ,')
+@click.argument('files', nargs=-1, required=True)
 @click.pass_context
-def _csv(ctx, files, delimiter):
-    lines = chain(*(csv.DictReader(x, delimiter=str(delimiter)) for x in files))
+def _csv(ctx, files):
+    delimiter = GLOABL_OPTIONS['delimiter']
+    encoding = GLOABL_OPTIONS['encoding']
+    line_start = GLOABL_OPTIONS['line_start']
+    line_count = GLOABL_OPTIONS['line_count']
+    fieldnames = csv_get_fieldnames(GLOABL_OPTIONS['header_file'], encoding)
+    lines = chain(*(csv.DictReader(FileWithLineRange(x, encoding, line_start, line_count), delimiter=delimiter, fieldnames=fieldnames) for x in files))
     log('info', 'Loading into ElasticSearch')
     load(lines, ctx.obj)
 
 
 @cli.command(name='json', short_help='FILES with the format of [{"a": "1"}, {"b": "2"}]')
 @click.argument('files', type=Stream(file_mode='rb'), nargs=-1, required=True)
-@click.option('--json-lines', default=False, is_flag=True, help='Files formated as json lines')
 @click.pass_context
-def _json(ctx, files, json_lines):
-    if json_lines:
+def _json(ctx, files):
+    if GLOABL_OPTIONS['json_lines']:
         lines = chain(*(json_lines_iter(x) for x in files))
     else:
         lines = chain(*(json.load(x) for x in files))
