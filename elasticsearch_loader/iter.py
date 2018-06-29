@@ -20,6 +20,8 @@ def bulk_builder(bulk, config):
                 
         if config['id_field']:
             body['_id'] = item[config['id_field']]
+            if body['_id'] == None or body['_id'] == '':
+                continue
             
             if config['as_child']:
                 body['_parent'] = body['_id']
