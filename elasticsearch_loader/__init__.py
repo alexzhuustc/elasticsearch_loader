@@ -13,43 +13,41 @@ import csv
 import click
 import time
 import codecs
+import traceback
 
 from .parsers import json, parquet
 from .iter import grouper, bulk_builder, json_lines_iter
 
 
-GLOABL_OPTIONS = {}
-
-
-class FileWithLineRange:
-    def __init__(self, filepath, encoding='utf-8', line_start = 0, line_count = -1):
+class FileWithOffsetRange:
+    def __init__(self, filepath, encoding='utf-8', offset_start = 0, offset_end = -1):
         self.fileobject = codecs.open(filepath, "r", encoding)
-        self.current_no = 0
-        self.line_start = line_start
-        self.line_end = -1
-        if line_count >= 0:
-            self.line_end = line_start + line_count
+        self.consumed_line_count = 0
+        self.offset_start = offset_start
+        self.offset_end = offset_end
+        
+        if self.offset_start > 0:
+            self.fileobject.seek(self.offset_start)
         
     def __iter__(self):
         return self
     
     def __next__(self):
-        while True:
-            ret = next(self.fileobject)
-            lineno = self.current_no
-            self.current_no += 1
-            
-            if lineno >= self.line_start and (self.line_end < 0 or lineno < self.line_end):
-                return ret
-                
-            if self.line_end >= 0 and lineno >= self.line_end:
-                raise StopIteration
+        current_offset = self.fileobject.tell()
+        
+        
+        if (current_offset < self.offset_start) or (self.offset_end >= 0 and current_offset >= self.offset_end):
+            raise StopIteration
+    
+        ret = next(self.fileobject)
+        self.consumed_line_count += 1
+        return ret
                 
     def __enter__(self):
         return self
     
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.fileobject.close()
+        self.fileobject.close()        
         
 def csv_get_fieldnames(filepath, encoding):
     if filepath == None or os.path.exists(filepath) == False:
@@ -57,6 +55,10 @@ def csv_get_fieldnames(filepath, encoding):
     
     with codecs.open(filepath, "r", encoding) as f:
         return [field.strip(" \t\r\n\"") for field in f.readline().split(',') ]
+
+def process_command_options(opts):
+    if opts['only_fields']:
+        opts['only_fields'] = list( x.strip('" \t\r\n\'') for x in opts['only_fields'].split(',') )
         
 def single_bulk_to_es(bulk, config, attempt_retry):
     bulk = bulk_builder(bulk, config)
@@ -95,7 +97,7 @@ def load(lines, config):
             try:
                 single_bulk_to_es(bulk, config, config['with_retry'])
             except Exception as e:
-                log('warn', 'Chunk {i} got exception ({e}) while processing'.format(e=e, i=i))
+                log('warn', 'Chunk {i} got exception ({e}) while processing'.format(e=traceback.format_exc(limit=99), i=i))
 
 
 def format_msg(msg, sevirity):
@@ -121,18 +123,20 @@ def log(sevirity, msg):
 @click.option('--progress', default=False, is_flag=True, help='Enable progress bar - NOTICE: in order to show progress the entire input should be collected and can consume more memory than without progress bar')
 @click.option('--type', help='Docs type', required=True)
 @click.option('--id-field', help='Specify field name that be used as document id')
+@click.option('--id-regex', help='Document id must match this regex pattern. Unmatched ids will be dropped')
+@click.option('--only-fields', help='Only import those fields. e.g. field1,field2,field3')
 @click.option('--as-child', default=False, is_flag=True, help='Insert _parent, _routing field, the value is same as _id')
 @click.option('--with-retry', default=False, is_flag=True, help='Retry if ES bulk insertion failed')
 @click.option('--index-settings-file', type=click.File('rb'), help='Specify path to json file containing index mapping and settings, creates index if missing')
 @click.option('--delimiter', default=',', type=str, help='[CSV] Default ,')
 @click.option('--encoding', default='utf-8', type=str, help='[CSV] Default utf-8')
 @click.option('--header-file', default=None, type=str, help='[CSV] File path that contains one-line header')
-@click.option('--line-start', default=0, help='[CSV] The line number where import starts, first line is 0. Default 0')
-@click.option('--line-count', default=-1, help='[CSV] How many lines to import. Default -1 means unlimit')
+@click.option('--offset-start', default=0, help='[CSV] The file offset where import starts, Default 0')
+@click.option('--offset-end', default=-1, help='[CSV] The file offset where import ends, -1 means unlimit')
 @click.option('--json-lines', default=False, is_flag=True, help='[JSON] Files formated as json lines')
 @click.pass_context
 def cli(ctx, **opts):
-    GLOABL_OPTIONS.update(opts)
+    process_command_options(opts)
     ctx.obj = opts
     es_opts = {x: y for x, y in opts.items() if x in ('use_ssl', 'ca_certs', 'verify_certs', 'http_auth')}
     ctx.obj['es_conn'] = Elasticsearch(opts['es_host'], **es_opts)
@@ -168,12 +172,13 @@ def cli(ctx, **opts):
 @click.argument('files', nargs=-1, required=True)
 @click.pass_context
 def _csv(ctx, files):
-    delimiter = GLOABL_OPTIONS['delimiter']
-    encoding = GLOABL_OPTIONS['encoding']
-    line_start = GLOABL_OPTIONS['line_start']
-    line_count = GLOABL_OPTIONS['line_count']
-    fieldnames = csv_get_fieldnames(GLOABL_OPTIONS['header_file'], encoding)
-    lines = chain(*(csv.DictReader(FileWithLineRange(x, encoding, line_start, line_count), delimiter=delimiter, fieldnames=fieldnames) for x in files))
+    opts = ctx.obj
+    delimiter = opts['delimiter']
+    encoding = opts['encoding']
+    offset_start = opts['offset_start']
+    offset_end = opts['offset_end']
+    fieldnames = csv_get_fieldnames(opts['header_file'], encoding)
+    lines = chain(*(csv.DictReader(FileWithOffsetRange(x, encoding, offset_start, offset_end), delimiter=delimiter, fieldnames=fieldnames) for x in files))
     log('info', 'Loading into ElasticSearch')
     load(lines, ctx.obj)
 
@@ -182,7 +187,8 @@ def _csv(ctx, files):
 @click.argument('files', type=Stream(file_mode='rb'), nargs=-1, required=True)
 @click.pass_context
 def _json(ctx, files):
-    if GLOABL_OPTIONS['json_lines']:
+    opts = ctx.obj
+    if opts['json_lines']:
         lines = chain(*(json_lines_iter(x) for x in files))
     else:
         lines = chain(*(json.load(x) for x in files))

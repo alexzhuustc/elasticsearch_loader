@@ -1,7 +1,7 @@
 --== Package ==--
-python3.6 setup.py bdist --format=zip
+python3.6 setup.py bdist_egg
 
 --== Install ==--
 run below command in 'root'
 cd dist
-easy_install-3.6 -H None -f dist elasticsearch-loader
+pip3.6 uninstall -y elasticsearch-loader ; easy_install-3.6 -H None -f . elasticsearch-loader

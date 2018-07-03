@@ -1,3 +1,5 @@
+import re
+
 try:
     from itertools import izip_longest as zip_longest
 except ImportError:
@@ -13,15 +15,28 @@ def grouper(iterable, n, fillvalue=None):
 
 
 def bulk_builder(bulk, config):
-    for item in filter(None, bulk):
+    for origin_item in filter(None, bulk):
+        item = {}
+        
+        if config['only_fields'] != None:
+            for k in config['only_fields']:
+                if k in origin_item:
+                    item[k] = origin_item[k]
+        else:
+            item = origin_item
+    
         body = {'_index': config['index'],
                 '_type': config['type'],
                 '_source': item}
                 
         if config['id_field']:
-            body['_id'] = item[config['id_field']]
+            body['_id'] = origin_item[config['id_field']]
             if body['_id'] == None or body['_id'] == '':
                 continue
+                
+            if config['id_regex']:
+                if re.match(config['id_regex'], body['_id']) == None:
+                    continue
             
             if config['as_child']:
                 body['_parent'] = body['_id']
