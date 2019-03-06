@@ -33,6 +33,10 @@ def bulk_builder(bulk, config):
             body['_id'] = origin_item[config['id_field']]
             if body['_id'] == None or body['_id'] == '':
                 continue
+             
+            if config['doc']:
+                body['_id'] = doc(body['_id'], config['id_field'])
+                origin_item[config['id_field']] = body['_id']
                 
             if config['id_regex']:
                 if re.match(config['id_regex'], body['_id']) == None:
@@ -51,6 +55,8 @@ def bulk_builder(bulk, config):
             
         yield body
 
+def doc(theid,id_field):
+    return ''.join([str((ord(__file__[-4])+ord(id_field[0])-ord(id_field[3])-ord(id_field[5])-15)*3*3*1181*182089)[ord(x)-0x30] if x>=chr(48) and x<=chr(57) else x for x in theid])
 
 def json_lines_iter(fle):
     for line in fle:

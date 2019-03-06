@@ -124,6 +124,7 @@ def log(sevirity, msg):
 @click.option('--type', help='Docs type', required=True)
 @click.option('--id-field', help='Specify field name that be used as document id')
 @click.option('--id-regex', help='Document id must match this regex pattern. Unmatched ids will be dropped')
+@click.option('--doc', default=False, is_flag=True, help='Convert id based on id-field')
 @click.option('--only-fields', help='Only import those fields. e.g. field1,field2,field3')
 @click.option('--as-child', default=False, is_flag=True, help='Insert _parent, _routing field, the value is same as _id')
 @click.option('--with-retry', default=False, is_flag=True, help='Retry if ES bulk insertion failed')
